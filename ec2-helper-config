@@ -1,0 +1,36 @@
+#!/bin/bash
+
+CIDR_THISIP="`curl -s checkip.dyndns.org | sed -e 's/.*Current IP Address: //' -e 's/<.*$//'`/32"
+CIDR_EVERYONE="0.0.0.0/0"
+
+
+EC2_HOME="???"
+EC2_URL="http://ec2.ap-southeast-1.amazonaws.com"
+EC2_PRIVATE_KEY=""        # default: the first file named pk-* in the resources directory
+EC2_CERT=""               # default: the first file named cert-* in the resources directory
+
+JAVA_HOME="/usr/lib/jvm/java-6-openjdk/"
+
+                          # missing directories are created automatically
+EC2H_PATH_RESOURCES=""    # default: "resources" directory in the same location as the helper script
+EC2H_PATH_INSTANCES=""    # default: "instances" file in the resources directory
+EC2H_PATH_TEMP=""         # default: "temp" directory in the same location as the helper script
+EC2H_PATH_LOG=""          # default: "ec2.log" file in the resources directory
+
+DEFAULT_KEYPAIR="General"
+DEFAULT_INSTANCE_TYPE="m1.small"
+DEFAULT_INSTANCE_GROUP="default"
+DEFAULT_WAIT_TRYWAIT="10"
+DEFAULT_WAIT_TRYNO="10"
+DEFAULT_SSH_TRYWAIT="10"
+DEFAULT_SSH_TRYNO="10"
+DEFAULT_SSH_USER="ubuntu"
+DEFAULT_GROUP_DESCRIPTION="N/A"
+DEFAULT_UPLOAD_DESTINATION="/tmp/"
+
+ALLTCP="-P tcp -p 0-65535"
+ALLUDP="-P udp -p 0-65535"
+ALLTCP_THISIP="$ALLTCP -s $CIDR_THISIP"
+ALLUDP_THISIP="$ALLUDP -s $CIDR_THISIP"
+SSH_THISIP="-P tcp -p 22 -s $CIDR_THISIP"
+HTTP_EVERYONE="-P tcp -p 80 -s $CIDR_EVERYONE"

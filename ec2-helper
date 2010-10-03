@@ -1,0 +1,665 @@
+#!/bin/bash
+### This is a script to simplify EC2 instance interactions, but an example will probably explain my goal better:
+### ./ec2-helper --instance-add ami-ea1e60b8 --instance-wait --instance-knowself --instance-upload --source ~/websitefiles.zip --instance-upload --source ~/virtual.conf --instance-upload --source ~/backup.sql --instance-ssh --sudo --run ~/setup.sh
+### This command does the following things, in order:
+### - starts an instance of the ami-eq1e60b8 image
+### - wait for the instance to finish initialising
+### - record some basic information about the instance on the instance fs
+### - upload a zip of website files
+### - upload a apache virtual config
+### - upload a mysql backup
+### - run a setup script on the instance as root (apt-get various packages, downloads various django plugins from their git/svn repos, unzips the website, adds instance info to virtual, restores db)
+### When the script is finished (10-15 minutes) the website is running
+###
+
+# get configuration values
+    . ./ec2-helper-config
+
+action_list=" --help --command "
+action_list="$action_list --keypair --keypair-help --keypair-add --keypair-fingerprint --keypair-file --keypair-show --keypair-delete --keypair-list "
+action_list="$action_list --group --group-help --group-add --group-authorize --group-revoke --group-delete --group-list "
+action_list="$action_list --instance --instance-help --instance-add --instance-wait --instance-ssh --instance-upload --instance-knowself --instance-delete --instance-update --instance-status --instance-list "
+
+## KEEP GOING AS LONG AS THERE IS ANOTHER ACTION
+while [ -n "$1" -a -n "`echo \"$action_list\" | grep -o \" $1 \"`" ]; do
+
+# look for action
+    case $1 in
+    "--help")                       action="${1:2}"; shift;;
+    
+    "--command")                    action="${1:2}"
+                                    shift
+                                    if [ -n "$1" -a "${1:0:2}" != '--' ]; then
+                                        command="$1"
+                                        shift
+                                    else
+                                        echo "The command value is required: $0 --$action \"<shell command>\"" >&2
+                                        exit 1
+                                    fi;;
+    
+    "--keypair"|"--keypair-help")   action="keypair-help"; shift;;
+    "--keypair-add"|"--keypair-fingerprint"|"--keypair-file"|"--keypair-show"|"--keypair-delete")
+                                    action="${1:2}"
+                                    shift
+                                    if [ -n "$1" -a "${1:0:2}" != '--' ]; then
+                                        keypair="$1"
+                                        shift
+                                    elif [ -z "$keypair" ]; then # i.e. a keypair hasn't been defined elsewhere
+                                        echo "Keypair name is required: $0 --$action <name>" >&2
+                                        exit 1
+                                    fi;;
+    "--keypair-list")               action="${1:2}"
+                                    shift;;
+    
+    "--group"|"--group-help")       action="group-help"; shift;;
+    "--group-add")                  action="${1:2}"
+                                    shift
+                                    if [ -n "$1" -a "${1:0:2}" != '--' ]; then
+                                        group="$1"
+                                        shift
+                                    elif [ -z "$group" ]; then # i.e. no group was defined previously
+                                        echo "Group name is required: $0 --$action <name> [--description <value>]"
+                                        exit 1
+                                    fi;;
+    "--group-authorize"|"--group-revoke")
+                                    action="${1:2}"
+                                    shift
+                                    if [ -n "$1" -a "${1:0:2}" != '--' ]; then
+                                        group="$1"
+                                        shift
+                                    elif [ -z "$group" ]; then # i.e. no group was defined previously
+                                        echo "Group name is required: $0 --$action <name> --options <value>"
+                                        exit 1
+                                    fi;;
+    "--group-delete")               action="${1:2}"
+                                    shift
+                                    if [ -n "$1" -a "${1:0:2}" != '--' ]; then
+                                        group="$1"
+                                        shift
+                                    elif [ -z "$group" ]; then # i.e. no group was defined previously
+                                        echo "Group name is required: $0 --$action <name>"
+                                        exit 1
+                                    fi;;
+                                    
+    "--group-list")                 action="${1:2}"
+                                    shift;;
+
+    "--instance"|"--instance-help") action="instance-help"; shift;;
+    "--instance-add")               action="${1:2}"
+                                    shift
+                                    if [ -n "$1" -a "${1:0:2}" != '--' ]; then
+                                        ami_id="$1"
+                                        shift
+                                    elif [ -z "$ami_id" ]; then # i.e. an ami id hasn't been defined elsewhere
+                                        echo "AMI ID is required: $0 --$action <ami id> [--keypair <value>] [--type <type>] [--region <value>]" >&2
+                                        exit 1
+                                    fi;;
+    "--instance-delete"|"--instance-knowself")
+                                    action="${1:2}"
+                                    shift
+                                    if [ -n "$1" -a "${1:0:2}" != '--' ]; then
+                                        instance_id="$1"
+                                        shift
+                                    elif [ -z "$instance_id" ]; then # i.e. an instance id hasn't been defined elsewhere
+                                        echo "Instance id is required: $0 --$action <instance id>" >&2
+                                        exit 1
+                                    fi;;
+    "--instance-ssh"|"--instance-wait")
+                                    action="${1:2}"
+                                    shift
+                                    if [ -n "$1" -a "${1:0:2}" != '--' ]; then
+                                        instance_id="$1"
+                                        shift
+                                    elif [ -z "$instance_id" ]; then # i.e. an instance id hasn't been defined elsewhere
+                                        echo "Instance id is required: $0 --$action <instance id> [--tryno <value>] [--trywait <value>]" >&2
+                                        exit 1
+                                    fi;;
+    "--instance-upload")            action="${1:2}"
+                                    shift
+                                    if [ -n "$1" -a "${1:0:2}" != '--' ]; then
+                                        instance_id="$1"
+                                        shift
+                                    elif [ -z "$instance_id" ]; then # i.e. an instance id hasn't been defined elsewhere
+                                        echo "Instance id is required: $0 --instance-upload <instance id> --source <value> --destination <value> [--keypair <value>] [--user <value>]" >&2
+                                        exit 1
+                                    fi;;
+    "--instance-update"|"--instance-status")
+                                    action="${1:2}"
+                                    shift
+                                    if [ -n "$1" -a "${1:0:2}" != '--' ]; then
+                                        instance_list="$1"
+                                        shift
+                                    elif [ -n "$instance_id" ]; then # i.e. an instance id HAS been defined earlier
+                                        instance_list="$instance_id"
+                                    fi;;
+    "--instance-list")              action="${1:2}"
+                                    shift
+;;
+    
+    *)                           echo "Invalid arguments. Use '$0 --help' for usage information" >&2; exit 1;;
+    esac
+
+# parse out other "--key value" arguments up until the next valid ec2-helper action
+    while [ -n "$1" -a -z "`echo \"$action_list\" | grep -o \" $1 \"`" ]; do
+        # we expect to have a -key value at the start
+        if [ "${1:0:2}" = '--' ]; then
+            nextvar="${1:2}"
+	    parameter_list="$parameter_list $nextvar"
+            shift
+            if [ -n "$1" -a "${1:0:2}" != '--' ]; then
+	        declare "$nextvar"="$1"
+                shift
+            else
+                declare "$nextvar"=1
+            fi
+        else
+            break
+        fi
+    done
+
+# intialise the various paths and environment variables
+    # the path of these scripts
+    EC2H_PATH="`dirname \"$0\"`"
+    EC2H_PATH="`( cd \"$EC2H_PATH\" && pwd )`"
+    if [ -z "$EC2H_PATH" ] ; then
+        echo "Could not determine script path" >&2
+        exit 1
+    fi
+    
+    if [ -z "$EC2H_PATH_RESOURCES" ]; then EC2H_PATH_RESOURCES="$EC2H_PATH/resources"; fi
+    if [ -z "$EC2H_PATH_INSTANCES" ]; then EC2H_PATH_INSTANCES="$EC2H_PATH_RESOURCES/instances"; fi
+    if [ -z "$EC2H_PATH_TEMP" ]; then EC2H_PATH_TEMP="$EC2H_PATH/tmp"; fi
+    if [ -z "$EC2H_PATH_LOG" ]; then EC2H_PATH_LOG="$EC2H_PATH_RESOURCES/ec2.log"; fi
+    EC2H_PATH_HELPER=$0
+    
+    if [ ! -d "$EC2H_PATH_RESOURCES" ]; then mkdir "$EC2H_PATH_RESOURCES"; fi
+    if [ ! -d "$EC2H_PATH_TEMP" ]; then mkdir "$EC2H_PATH_TEMP"; fi
+    
+    # if the ec2 key and certificate haven't been defined, try to figure them out
+    if [ -z "$EC2_PRIVATE_KEY" -a -z "$EC2_CERT" ]; then
+        for f in $EC2H_PATH_RESOURCES/pk-*; do
+	    export EC2_PRIVATE_KEY=$f
+        done
+        for f in $EC2H_PATH_RESOURCES/cert-*; do
+	    export EC2_CERT=$f
+        done
+    fi
+    
+    export EC2_HOME
+    export EC2_URL
+    export EC2_PRIVATE_KEY
+    export EC2_CERT
+    
+    export JAVA_HOME
+    export PATH=$PATH:$EC2_HOME/bin
+
+usage(){
+    oldIFS=$IFS
+    IFS=$'\n'
+    sectionalready=0
+    commandalready=0
+    for line in $(grep -o -E "^\s*###.*?$" $0); do
+        if [[ "$line" == *#####* ]]; then
+            if [ $sectionalready -gt 0 ]; then echo -e "\n"; fi
+            sectionalready=1
+            commandalready=0
+            echo "========== $line COMMANDS ==========" | sed -r 's/\s+#+ //'
+        elif [[ "$line" == *####* ]]; then
+            # command
+            if [ $commandalready -gt 0 ]; then echo -e ""; fi
+            commandalready=1
+            #echo "--$line" | sed -r 's/\s+#+ //'
+        else 
+            # help text
+            echo "$line" | sed -r 's/^\s*### ?//'
+        fi
+    done
+    IFS=$old_IFS
+}
+    
+case $action in
+    
+    "command")
+        $command;;
+    
+    ##### HELP
+    #### help
+    ### General help
+    ### Usage: ./ec2-helper --help
+    "help") usage;;
+
+    ##### KEYPAIR
+    #### keypair-add
+    ### Create a keypair
+    ### Usage: ./ec2-helper --keypair-add <name>
+    "keypair-add") 
+	if [ -z "$keypair" ]; then echo "Keypair is required: $0 --$action <keypair>">&2; exit 1; fi
+	
+	if ec2-add-keypair $keypair > $EC2H_PATH_RESOURCES/$keypair-keypair
+	then
+	    grep -o -E "[a-z0-9]{2}(\:[a-z0-9]{2})+" < $EC2H_PATH_RESOURCES/$keypair-keypair > $EC2H_PATH_RESOURCES/$keypair-fingerprint
+
+	    chmod 600 $EC2H_PATH_RESOURCES/$keypair-keypair
+	    chmod 600 $EC2H_PATH_RESOURCES/$keypair-fingerprint
+            
+	    echo "`date --rfc-3339=seconds`,ec2-add-keypair,$keypair" >> $EC2H_PATH_LOG
+	    echo "KEYPAIR $keypair created"
+	else
+	    echo "ERROR: Could not create KEYPAIR $keypair">&2
+	    exit 1
+	fi;;
+    
+    #### keypair-fingerprint
+    ### Output the fingerprint of a keypair
+    ### Usage: ./ec2-helper --keypair-fingerprint <name>
+    "keypair-fingerprint")
+        if [ -z $keypair ]; then echo "Keypair is required: $0 --$action <keypair>">&2; exit 1; fi
+	
+	if [ -f $EC2H_PATH_RESOURCES/$keypair-fingerprint ]; then
+	    cat $EC2H_PATH_RESOURCES/$keypair-fingerprint
+	else
+	    new_keypair_public=`ec2-describe-keypairs | grep -E "\b$keypair\b" | grep -o -E "[a-z0-9]{2}(\:[a-z0-9]{2})+"`
+	    if [ -n "$new_keypair_public" ]; then
+		echo $new_keypair_public > $EC2H_PATH_RESOURCES/$keypair-fingerprint
+		echo $new_keypair_public
+	    else
+		echo "KEYPAIR $keypair does not exist">&2
+		exit 1
+	    fi
+	fi;;
+    
+    #### keypair-file
+    ### Output the filepath to the keypair key
+    ### Usage: ./ec2-helper --keypair-file <name>
+    "keypair-file")
+	if [ -z "$keypair" ]; then echo "Keypair is required: $0 --$action <keypair>">&2; exit 1; fi
+	
+	if [ -f $EC2H_PATH_RESOURCES/$keypair-keypair ]; then
+	    echo "$EC2H_PATH_RESOURCES/$keypair-keypair"
+	else
+	    echo "KEYPAIR $keypair not available">&2
+	    exit 1
+	fi;;
+    
+    #### keypair-delete
+    ### Delete a keypair
+    ### Usage: ./ec2-helper --keypair-delete <name>
+    "keypair-delete")
+        if [ -z $keypair ]; then echo "Keypair is required: $0 --$action <keypair>">&2; exit 1; fi
+	
+	ec2-delete-keypair $keypair > /dev/null
+	rm -f $EC2H_PATH_RESOURCES/$keypair-fingerprint
+	rm -f $EC2H_PATH_RESOURCES/$keypair-keypair
+	echo "`date --rfc-3339=seconds`,ec2-delete-keypair,$keypair" >> $EC2H_PATH_LOG
+	echo "KEYPAIR $keypair deleted";;
+    
+    #### keypair-show
+    ### Output the keypair key
+    ### Usage: ./ec2-helper --keypair-show <name>
+    "keypair-show")
+	if [ -z $keypair ]; then echo "Keypair is required: $0 --$action <keypair>">&2; exit 1; fi
+	
+	if [ -f $EC2H_PATH_RESOURCES/$keypair-keypair ]; then
+	    cat $EC2H_PATH_RESOURCES/$keypair-keypair
+	else
+	    if [ -f $EC2H_PATH_RESOURCES/$keypair-fingerprint ]; then
+		echo -n -e "KEYPAIR $keypair\t" | cat - $EC2H_PATH_RESOURCES/$keypair-fingerprint
+	        echo "KEYPAIR $keypair not available"
+	    else
+		echo "KEYPAIR $keypair does not exist">&2
+		exit 1
+	    fi
+	fi;;	
+    
+    #### keypair-list
+    ### Output the keypair information provided by the EC2 API
+    ### Usage: ./ec2-helper --keypair-list
+    "keypair-list")
+	ec2-describe-keypairs;;
+    
+    ##### GROUP
+    #### group-add
+    ### Create a group
+    ### Usage: ./ec2-helper --group-add <name> [--description <value>]
+    ###        --description  Notes about the group
+    "group-add")
+        if [ -z "$group" ]; then echo "Group name is required: $0 --$action <name> [--description <value>]" exit 1; fi
+        if [ -z "$description" ]; then description=$DEFAULT_GROUP_DESCRIPTION; fi
+        
+        ec2-add-group $group -d "$description" > $EC2H_PATH_TEMP/output_ec2-add-group
+        if [ $? = 0 ]; then
+            echo "`date --rfc-3339=seconds`,ec2-add-group,$group" >> $EC2H_PATH_LOG
+            echo "GROUP $group created"
+        else
+            echo "ERROR creating group"
+            exit 1
+        fi;;
+    
+    #### group-authorize
+    ### Usage: ./ec2-helper --group-authorize <name> --options <value>
+    ###        --options      String containing parameters as required by ec2-authorize
+    ###                       OR
+    ###                       The name of a variable defined in ec2-helper-config containing
+    ###                       those parameters
+    "group-authorize")
+        if [ -z "$group" ]; then echo "Group name is required: $0 --$action <name> --options <value>"; exit 1; fi
+        if [ -z "$options" ]; then echo "Options must be provided: $0 --$action <name> --options <value>"; exit 1; fi
+        
+        # if options is a variable name and the variable is not empty, set options to that
+        if [ -z "`echo \"$options\" | grep -o -E \"[^a-zA-Z0-9_]\"`" -a -n "`eval eval echo '\$${options}'`" ]; then
+            eval eval 'options=\$${options}'
+        fi
+        
+        ec2-authorize $group $options > $EC2H_PATH_TEMP/output_ec2-authorize
+        if [ $? = 0 ]; then
+            echo "`date --rfc-3339=seconds`,ec2-authorize,$group[$options]" >> $EC2H_PATH_LOG
+            echo "GROUP $group authorization updated"
+        else
+            echo "ERROR authorizing group"
+            exit 1
+        fi;;
+    
+    #### group-revoke
+    ### Deny a group access authorization
+    ### Usage: ./ec2-helper --group-revoke <name> --options <value>
+    ###        --options      String containing parameters as required by ec2-revoke
+    ###                       OR
+    ###                       The name of a variable defined in ec2-helper-config containing
+    ###                       those parameters
+    "group-revoke")
+        if [ -z "$group" ]; then echo "Group name is required: $0 --$action <name> --options <value>"; exit 1; fi
+        if [ -z "$options" ]; then echo "Options must be provided: $0 --$action <name> --options <value>"; exit 1; fi
+        
+        # if options is a variable name and the variable is not empty, set options to that
+        if [ -z "`echo \"$options\" | grep -o -E \"[^a-zA-Z0-9_]\"`" -a -n "`eval eval echo '\$${options}'`" ]; then
+            eval eval 'options=\$${options}'
+        fi
+        
+        ec2-revoke $group $options > $EC2H_PATH_TEMP/output_ec2-revoke
+        if [ $? = 0 ]; then
+            echo "`date --rfc-3339=seconds`,ec2-revoke,$group[$options]" >> $EC2H_PATH_LOG
+            echo "GROUP $group authorization updated"
+        else
+            echo "ERROR revoking group"
+            exit 1
+        fi;;
+
+    #### group-delete
+    ### Delete a group
+    ### Usage: ./ec2-helper --group-delete <name>
+    "group-delete")
+        if [ -z "$group" ]; then echo "Group name is required: $0 --$action <name>"; exit 1; fi
+        
+        ec2-delete-group $group > $EC2H_PATH_TEMP/output_ec2-delete-group
+        if [ $? = 0 ]; then
+            echo "`date --rfc-3339=seconds`,ec2-delete-group,$group" >> $EC2H_PATH_LOG
+            echo "GROUP $group deleted"
+        else
+            echo "ERROR creating group"
+            exit 1
+        fi;;
+    
+    #### group-list
+    ### Output the group information provided by the EC2 API
+    ### Usage: ./ec2-helper --group-list
+    "group-list")
+        ec2-describe-group;;
+    
+    ##### INSTANCE
+    #### instance-add
+    ### Create an instance
+    ### Usage: ./ec2-helper --instance-add <ami id> [--keypair <value>] [--type <type>] [--group <name>]
+    ###        --keypair      SSH key (DEFAULT: General)
+    ###        --type         Instance type (DEFAULT: m1.small)
+    ###        --group        Group to assign to the instance (DEFAULT: default)
+    "instance-add")
+	# Check values
+	if [ -z "$ami_id" ]; then echo "AMI ID is required: $0 --$action <amiid> [--keypair <value>] [--type <type>]" >&2; exit 1; fi
+        if [ -z "$keypair" ]; then keypair=$DEFAULT_KEYPAIR; fi
+        if [ -z "$type" ]; then type=$DEFAULT_INSTANCE_TYPE; fi
+        if [ -z "$group" ]; then group=$DEFAULT_INSTANCE_GROUP; fi
+        
+	# Get the keypair file, create it if it doesn't exist
+	instance_keypair_file=`$EC2H_PATH_HELPER --keypair-file "$keypair"`
+	if [ $? != 0 ]; then $EC2H_PATH_HELPER --keypair-add "$keypair"; fi
+	
+        # image from http://uec-images.ubuntu.com/lucid/20100727/ ami-1fc7b84d
+        instance_id=`ec2-run-instances $ami_id --instance-type $type --key $keypair --group $group | tee "$EC2H_PATH_TEMP/output_ec2-run-instances" | grep -E "^INSTANCE" | tee "$EC2H_PATH_TEMP/output_grep" | cut -f 2`
+        # explanation for future-me:
+        # - instanceid=`...` = set variable to output of command
+        # - ec2-run-instances imageid instancetype region sshkey
+        # - | grep -o E = search standard input for regex and only output match
+        # - " i-\w+" = instance id starts with 'i-'
+        # - | sed 's/ //' = we matched a space to make sure the 'i' was at the start, this 's'ubstitutes it with an empty string
+	
+	if [ $? = 0 -a -n "$instance_id" ]
+	then
+            echo -e "$instance_id\t$keypair\tpending\tdomain.unknown" >> $EC2H_PATH_INSTANCES
+	    echo "`date --rfc-3339=seconds`,ec2-run-instances,$instance_id" >> $EC2H_PATH_LOG
+	    echo "INSTANCE $instance_id created"
+        else
+	    echo "ERROR creating instance">&2
+	    exit 1
+	fi;;
+
+    #### instance-wait
+    ### Wait until the specified instance has transitioned to a stable status (running or terminated)
+    ### Usage: ./ec2-helper --instance-wait <instance id> [--tryno <value>] [--trywait <value>]
+    ###        --tryno        Number of checks before giving up (DEFAULT: 10)
+    ###        --trywait      Wait between tries, in seconds (DEFAULT: 10)
+    "instance-wait")
+	if [ -z "$instance_id" ]; then echo "Instance ID is required: $0 --$action <instance id> [--tryno <value>] [--trywait <value>]">&2; exit 1; fi
+        expr 1 + $tryno 2>/dev/null; if [ $? != 0 ]; then tryno=$DEFAULT_WAIT_TRYNO; fi
+        expr 1 + $trywait 2>/dev/null; if [ $? != 0 ]; then trywait=$DEFAULT_WAIT_TRYWAIT; fi
+        
+        instance_status=`$EC2H_PATH_HELPER --instance-status $instance_id | cut -f 2`
+        try_count=1
+        while [ $try_count -le $tryno -a -n "`echo \" pending shutting down \" | grep -o \" $instance_status \"`" ]; do
+            sleep $trywait
+            let try_count=try_count+1
+            instance_status=`$EC2H_PATH_HELPER --instance-update $instance_id | cut -f 2`
+        done
+        if [ -n "$instance_status" -a -n "`echo \" running terminated \" | grep -o \" $instance_status \"`" ]; then
+            echo "Status updated"
+        else
+            echo "Status unchanged"
+        fi
+        echo -e "$instance_id\t$instance_status";;
+    
+    #### instance-ssh
+    ### Open an SSH connection to the specified instance
+    ### Usage: ./ec2-helper --instance-ssh <instance id> [--keypair <value>] [--user <value>] [--run <value> [--sudo]] [--tryno <value>] [--trywait <value>]
+    ###        --keypair      Defaults to the key the instance was initialised with
+    ###        --user         DEFAULT: ubuntu
+    ###        --run          A file to upload and execute
+    ###                       OR
+    ###                       A shell command to execute
+    ###        --sudo         Execute --run script as SU
+    ###        --tryno        Number of tries before giving up (DEFAULT: 10)
+    ###        --trywait      Wait between tries, in seconds (DEFAULT: 10)
+    "instance-ssh")
+	if [ -z "$keypair" ]; then keypair=`grep "$instance_id" "$EC2H_PATH_INSTANCES" | cut -f 2`; fi
+        if [ -z "$user" ]; then user="$DEFAULT_SSH_USER"; fi
+        if [ -z "$sudo" ]; then su=0; fi
+        if [ -z "$run" ]; then run=""; fi
+        expr 1 + $tryno >/dev/null 2>/dev/null; if [ $? != 0 ]; then tryno=$DEFAULT_SSH_TRYNO; fi
+        expr 1 + $trywait >/dev/null 2>/dev/null; if [ $? != 0 ]; then trywait=$DEFAULT_SSH_TRYWAIT; fi
+        
+	instance_domain=`grep "$instance_id" "$EC2H_PATH_INSTANCES" | cut -f 4`
+        keypair_file=`$EC2H_PATH_HELPER --keypair-file $keypair`
+        #echo "ssh -i \"$EC2H_PATH_RESOURCES/$instance_keypair-keypair\" root@$instance_domain"
+        echo "`date --rfc-3339=seconds`,ssh,$instance_id" >> $EC2H_PATH_LOG
+        
+        if [ -n "$run" -a -f "$run" ]; then
+            # copy file to server
+            #$EC2H_PATH_HELPER --instance-upload $instance_id --source "$run" --destination "${user}@$instance_domain:/tmp" --keypair "$keypair" --user "$user" --tryno $tryno --trywait $trywait
+            scp -qp -o StrictHostKeyChecking=no -o ConnectionAttempts=30 -i $keypair_file "$run" ${user}@$instance_domain:/tmp/
+            run="/tmp/`basename $run`"
+            
+            # build commands to execute
+            if [ $sudo = 0 ]; then 
+                run="chmod +x $run; $run; rm $run;"
+            else 
+                run="chmod +x $run; sudo $run; rm $run;"
+            fi
+        elif [ -n "$run" ]; then
+	    if [ $sudo = 0 ]; then
+		run="$run;"
+	    else
+		run="if [ ! -d /tmp ]; then sudo mkdir /tmp; sudo chmod 777 /tmp; fi; echo \"$run\" >> /tmp/inline.sh;chmod +x /tmp/inline.sh;sudo /tmp/inline.sh;"
+	    fi
+        fi
+	
+        if [ -n "$run" ]; then
+	    ssh -q -o StrictHostKeyChecking=no -o ConnectionAttempts=30 -i $keypair_file ${user}@$instance_domain <<< "$run exit;" | tee $EC2H_PATH_TEMP/output_ssh
+        else
+	    ssh -q -o StrictHostKeyChecking=no -o ConnectionAttempts=30 -i $keypair_file ${user}@$instance_domain | tee $EC2H_PATH_TEMP/output_ssh
+        fi
+        try_count=1
+        
+        while [ $? != 0 -a $try_count -le $tryno ]; do
+            sleep $trywait
+            let try_count=try_count+1
+            
+            if [ -n "$run" ]; then
+                ssh -q -i $keypair_file ${user}@$instance_domain -o StrictHostKeyChecking=no -o ConnectionAttempts=30 <<< "$run exit;" | tee $EC2H_PATH_TEMP/output_ssh
+            else
+                ssh -q -i $keypair_file ${user}@$instance_domain -o StrictHostKeyChecking=no -o ConnectionAttempts=30 | tee $EC2H_PATH_TEMP/output_ssh
+            fi
+        done
+        if [ $? != 0 ]; then
+            echo "ERROR starting ssh connect to $instance_id" >&2
+            exit 1
+        fi;;
+    
+    #### instance-upload
+    ### Upload files to the specified instance using SCP
+    ### Usage: ./ec2-helper --instance-upload <instance id> --source <value> --destination <value> [--keypair <value>] [--user <value>]
+    ###        --source       Local source path, as defined by SCP
+    ###        --destination  Instance destination path, as defined by SCP
+    ###        --keypair      Defaults to the key the instance was initialised with
+    ###        --user         DEFAULT: ubuntu
+    "instance-upload")
+	if [ -z "$keypair" ]; then keypair=`grep "$instance_id" "$EC2H_PATH_INSTANCES" | cut -f 2`; fi
+        if [ -z "$source" ]; then echo "Source is required: $0 --instance-upload <instance id> --source <value> --destination <value> [--keypair <value>] [--user <value>]" >&2; exit 1; fi
+        if [ -z "$destination" ]; then destination="$DEFAULT_UPLOAD_DESTINATION"; fi
+        if [ -z "$user" ]; then user="$DEFAULT_SSH_USER"; fi
+        expr 1 + $tryno >/dev/null 2>/dev/null; if [ $? != 0 ]; then tryno=$DEFAULT_SSH_TRYNO; fi
+        expr 1 + $trywait >/dev/null 2>/dev/null; if [ $? != 0 ]; then trywait=$DEFAULT_SSH_TRYWAIT; fi
+        
+	instance_domain=`grep "$instance_id" "$EC2H_PATH_INSTANCES" | cut -f 4`
+        keypair_file=`$EC2H_PATH_HELPER --keypair-file $keypair`
+        #echo "ssh -i \"$EC2H_PATH_RESOURCES/$instance_keypair-keypair\" root@$instance_domain"
+        echo "`date --rfc-3339=seconds`,ssh,$instance_id" >> $EC2H_PATH_LOG
+        
+        # copy files to server
+        scp -qp -o StrictHostKeyChecking=no -o ConnectionAttempts=30 -i $keypair_file $source ${user}@$instance_domain:$destination
+        
+        trycount=1
+        while [ $? != 0 -a $trycount -le $tryno ]; do
+            sleep $trywait
+            let trycount=trycount+1
+            
+            scp -qp -o StrictHostKeyChecking=no -o ConnectionAttempts=30 -i $keypair_file $source ${user}@$instance_domain:$destination
+        done
+        if [ $? != 0 ]; then
+            echo "ERROR uploading to $instance_id" >&2
+            exit 1
+        fi;;
+    
+    #### instance-knowself
+    ### Update an instances self-knowledge information (/opt/publicdns)
+    ### Usage: ./ec2-helper --instance-knowself <instance id>
+    "instance-knowself")
+	if [ -z $instance_id ]; then
+	    echo "Instance ID is required: $0 --$action <instance id>">&2
+	    exit 1
+	fi
+	
+        instance_domain=`grep "$instance_id" "$EC2H_PATH_INSTANCES" | cut -f 4`
+        $EC2H_PATH_HELPER --instance-ssh $instance_id --sudo --run "echo 'publicdns=$instance_domain' > /opt/self";;
+    
+    #### instance-delete
+    ### Delete the specified instance
+    ### Usage: ./ec2-helper --instance-delete <instance id>
+    "instance-delete")
+	if [ -z $instance_id ]; then
+	    echo "Instance ID is required: $0 --$action <instance id>">&2
+	    exit 1
+	fi
+        
+	ec2-terminate-instances $instance_id > /dev/null
+	instance_status=`grep -E "^$instance_id" "$EC2H_PATH_INSTANCES" | cut -f 3`
+	sed -i "/$instance_id/s/$instance_status/shutting down/" "$EC2H_PATH_INSTANCES"
+	echo "`date --rfc-3339=seconds`,ec2-terminate-instaces,$instance_id" >> $EC2H_PATH_LOG
+	echo "INSTANCE $instance_id deleted";;
+    
+    #### instance-list
+    ### Output the instance information provided by the EC2 API
+    ### Usage: ./ec2-helper --instance-list
+    "instance-list")
+	ec2-describe-instances;;
+    
+    #### instance-update
+    ### Update instance status using the EC2 API, outputs retrieved statuses
+    ### NOTE: known instances that are not listed by the API are updated to 'terminated'
+    ### Usage: ./ec2-helper --instance-update [ <instance-id> | - ]
+    ###        DEFAULT        Update status of all non-terminated instances
+    ###        <instance id>  Update status of specified instance
+    ###        -              Update status of all non-terminated instances, and record the
+    ###                       status, keypair, and domain for previously unknown instances
+    "instance-update")
+	ec2-describe-instances > $EC2H_PATH_TEMP/output_ec2-describe-instances
+	if [ -z "$instance_list" ]; then
+	    instance_list=`grep -v "terminated" "$EC2H_PATH_INSTANCES" | cut -f 1`
+	elif [ $instance_list = "-" ]; then
+	    for instance_info in `grep -E "^INSTANCE" "$EC2H_PATH_TEMP/output_ec2-describe-instances"`; do
+		instance_id=`echo "$instance_info" | cut -f 2`
+		instance_domain=`echo "$instance_info" | cut -f 4`
+		instance_status=`echo "$instance_info" | cut -f 6`
+	        instance_keypair=`echo "$instance_info" | cut -f 7`
+		if [ `grep -c "$instance_id" ` = 0 ]; then
+		    echo -e "$instance_id\t$instance_keypair\t$instance_status\t$instance_domain" >> $EC2H_PATH_INSTANCES
+		fi
+	    done
+	    instance_list=`grep -v "terminated" "$EC2H_PATH_INSTANCES" | cut -f 1`
+        fi
+	for instance_id in $instance_list
+	do
+	    instance_old_status=`grep -E "^$instance_id" "$EC2H_PATH_INSTANCES" | cut -f 3`
+	    instance_old_domain=`grep -E "^$instance_id" "$EC2H_PATH_INSTANCES" | cut -f 4`
+	    instance_new_status=`grep "$instance_id" "$EC2H_PATH_TEMP/output_ec2-describe-instances" | cut -f 6`
+	    instance_new_domain=`grep "$instance_id" "$EC2H_PATH_TEMP/output_ec2-describe-instances" | cut -f 4`
+	    
+	    if [ -z $instance_new_status ]; then
+		instance_new_status="terminated"
+	    fi
+	    
+	    sed -i "/$instance_id/s/$instance_old_status/$instance_new_status/" "$EC2H_PATH_INSTANCES"
+	    test -n "$instance_old_domain" -a -n "$instance_new_domain" && sed -i "/$instance_id/s/$instance_old_domain/$instance_new_domain/" "$EC2H_PATH_INSTANCES"
+	    
+	    echo -e "$instance_id\t$instance_new_status\t$instance_new_domain"
+	done;;
+
+    #### instance-status
+    ### Output instance status, i.e. pending / running / shutting down / terminated
+    ### Usage: ./ec2-helper --instance-status [ <instance-id> | - ]
+    ###        DEFAULT        Show status of all non-terminated instances
+    ###        <instance id>  Show status of specified instance
+    ###        -              Show status of all recorded instances    
+    "instance-status")
+    	if [ -z "$instance_list" ]; then
+	    instance_list=`grep -v "terminated" "$EC2H_PATH_INSTANCES" | cut -f 1`
+	elif [ "$instance_list" = "-" ]; then
+	    instance_list=`cut -f 1 "$EC2H_PATH_INSTANCES"`
+	fi
+	for instance_id in $instance_list; do
+	    echo -e "$instance_id\t`grep -E "^$instance_id" "$EC2H_PATH_INSTANCES" | cut -f 3`"
+	done;;
+
+    *)
+        exit 1;;
+
+    esac
+
+done
