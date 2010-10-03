@@ -1,0 +1,114 @@
+This is a script to simplify EC2 instance interactions, but an example will probably explain my goal better:
+./ec2-helper --instance-add ami-ea1e60b8 --instance-wait --instance-knowself --instance-upload --source ~/websitefiles.zip --instance-upload --source ~/virtual.conf --instance-upload --source ~/backup.sql --instance-ssh --sudo --run ~/setup.sh
+This command does the following things, in order:
+- starts an instance of the ami-eq1e60b8 image
+- wait for the instance to finish initialising
+- record some basic information about the instance on the instance fs
+- upload a zip of website files
+- upload a apache virtual config
+- upload a mysql backup
+- run a setup script on the instance as root (apt-get various packages, downloads various django plugins from their git/svn repos, unzips the website, adds instance info to virtual, restores db)
+When the script is finished (10-15 minutes) the website is running
+
+==========HELP COMMANDS ==========
+General help
+Usage: ./ec2-helper --help
+
+
+==========KEYPAIR COMMANDS ==========
+Create a keypair
+Usage: ./ec2-helper --keypair-add <name>
+
+Output the fingerprint of a keypair
+Usage: ./ec2-helper --keypair-fingerprint <name>
+
+Output the filepath to the keypair key
+Usage: ./ec2-helper --keypair-file <name>
+
+Delete a keypair
+Usage: ./ec2-helper --keypair-delete <name>
+
+Output the keypair key
+Usage: ./ec2-helper --keypair-show <name>
+
+Output the keypair information provided by the EC2 API
+Usage: ./ec2-helper --keypair-list
+
+
+==========GROUP COMMANDS ==========
+Create a group
+Usage: ./ec2-helper --group-add <name> [--description <value>]
+       --description  Notes about the group
+
+Usage: ./ec2-helper --group-authorize <name> --options <value>
+       --options      String containing parameters as required by ec2-authorize
+                      OR
+                      The name of a variable defined in ec2-helper-config containing
+                      those parameters
+
+Deny a group access authorization
+Usage: ./ec2-helper --group-revoke <name> --options <value>
+       --options      String containing parameters as required by ec2-revoke
+                      OR
+                      The name of a variable defined in ec2-helper-config containing
+                      those parameters
+
+Delete a group
+Usage: ./ec2-helper --group-delete <name>
+
+Output the group information provided by the EC2 API
+Usage: ./ec2-helper --group-list
+
+
+==========INSTANCE COMMANDS ==========
+Create an instance
+Usage: ./ec2-helper --instance-add <ami id> [--keypair <value>] [--type <type>] [--group <name>]
+       --keypair      SSH key (DEFAULT: General)
+       --type         Instance type (DEFAULT: m1.small)
+       --group        Group to assign to the instance (DEFAULT: default)
+
+Wait until the specified instance has transitioned to a stable status (running or terminated)
+Usage: ./ec2-helper --instance-wait <instance id> [--tryno <value>] [--trywait <value>]
+       --tryno        Number of checks before giving up (DEFAULT: 10)
+       --trywait      Wait between tries, in seconds (DEFAULT: 10)
+
+Open an SSH connection to the specified instance
+Usage: ./ec2-helper --instance-ssh <instance id> [--keypair <value>] [--user <value>] [--run <value> [--sudo]] [--tryno <value>] [--trywait <value>]
+       --keypair      Defaults to the key the instance was initialised with
+       --user         DEFAULT: ubuntu
+       --run          A file to upload and execute
+                      OR
+                      A shell command to execute
+       --sudo         Execute --run script as SU
+       --tryno        Number of tries before giving up (DEFAULT: 10)
+       --trywait      Wait between tries, in seconds (DEFAULT: 10)
+
+Upload files to the specified instance using SCP
+Usage: ./ec2-helper --instance-upload <instance id> --source <value> --destination <value> [--keypair <value>] [--user <value>]
+       --source       Local source path, as defined by SCP
+       --destination  Instance destination path, as defined by SCP
+       --keypair      Defaults to the key the instance was initialised with
+       --user         DEFAULT: ubuntu
+
+Update an instances self-knowledge information (/opt/publicdns)
+Usage: ./ec2-helper --instance-knowself <instance id>
+
+Delete the specified instance
+Usage: ./ec2-helper --instance-delete <instance id>
+
+Output the instance information provided by the EC2 API
+Usage: ./ec2-helper --instance-list
+
+Update instance status using the EC2 API, outputs retrieved statuses
+NOTE: known instances that are not listed by the API are updated to 'terminated'
+Usage: ./ec2-helper --instance-update [ <instance-id> | - ]
+       DEFAULT        Update status of all non-terminated instances
+       <instance id>  Update status of specified instance
+       -              Update status of all non-terminated instances, and record the
+                      status, keypair, and domain for previously unknown instances
+
+Output instance status, i.e. pending / running / shutting down / terminated
+Usage: ./ec2-helper --instance-status [ <instance-id> | - ]
+       DEFAULT        Show status of all non-terminated instances
+       <instance id>  Show status of specified instance
+       -              Show status of all recorded instances    
